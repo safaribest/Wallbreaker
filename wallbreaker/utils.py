@@ -18,7 +18,7 @@ class DvmDescConverter:
         if result.startswith('L') and result.endswith(';'):
             result = result[1: -1]
 
-        result = result.replace('/', '')
+        result = result.replace('/', '.')
 
         result += "[]" * dim
         return result
