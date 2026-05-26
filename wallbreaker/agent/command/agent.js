@@ -279,11 +279,53 @@ var _defineProperty = _interopRequireDefault(require("@babel/runtime-corejs2/cor
 
 var struct_1 = require("./struct");
 
+var debug = function debug(event, detail) {
+  if (detail === void 0) {
+    detail = {};
+  }
+
+  try {
+    send({
+      type: "wallbreaker-debug",
+      event: event,
+      detail: detail
+    });
+  } catch (e) {}
+};
+
+var errorMessage = function errorMessage(e) {
+  if (e && e.stack) {
+    return e.stack;
+  }
+
+  return String(e);
+};
+
+var isJavaAvailable = function isJavaAvailable() {
+  try {
+    return Java.available;
+  } catch (e) {
+    return false;
+  }
+};
+
 exports.match = function (name) {
   var result = [];
 
   try {
-    Java.perform(function () {
+    if (!isJavaAvailable()) {
+      debug("java_unavailable", {
+        operation: "class_match",
+        pattern: name,
+        message: "Frida Java bridge is unavailable in the current process. Check that Objection is attached to the Android app process after ART is initialized."
+      });
+      return result;
+    }
+
+    Java.performNow(function () {
+      debug("class_match_start", {
+        pattern: name
+      });
       Java.enumerateLoadedClassesSync().forEach(function (p1) {
         if (p1.startsWith("[")) {
           return;
@@ -293,17 +335,55 @@ exports.match = function (name) {
           result.push(p1);
         }
       });
+      debug("class_match_done", {
+        pattern: name,
+        count: result.length
+      });
     });
-  } catch (e) {}
+  } catch (e) {
+    debug("class_match_error", {
+      pattern: name,
+      error: errorMessage(e)
+    });
+  }
 
   return result;
 };
 
 exports.use = function (name) {
   var result = struct_1.ClassWrapper.NONE;
-  Java.perform(function () {
-    result = struct_1.ClassWrapper.byWrapper(Java.use(name));
-  });
+
+  try {
+    if (!isJavaAvailable()) {
+      debug("java_unavailable", {
+        operation: "class_use",
+        name: name,
+        message: "Frida Java bridge is unavailable in the current process. Check that Objection is attached to the Android app process after ART is initialized."
+      });
+      return result;
+    }
+
+    Java.performNow(function () {
+      debug("class_use_start", {
+        name: name
+      });
+      result = struct_1.ClassWrapper.byWrapper(Java.use(name));
+      debug("class_use_done", {
+        name: name,
+        constructors: result.constructors.length,
+        staticMethods: Object.keys(result.staticMethods).length,
+        instanceMethods: Object.keys(result.instanceMethods).length,
+        staticFields: Object.keys(result.staticFields).length,
+        instanceFields: Object.keys(result.instanceFields).length
+      });
+    });
+  } catch (e) {
+    debug("class_use_error", {
+      name: name,
+      error: errorMessage(e)
+    });
+  }
+
   return result;
 };
 
@@ -328,6 +408,17 @@ var _defineProperty = _interopRequireDefault(require("@babel/runtime-corejs2/cor
 var classkit_1 = require("./classkit");
 
 var objectkit_1 = require("./objectkit");
+
+try {
+  send({
+    type: "wallbreaker-debug",
+    event: "agent_loaded",
+    detail: {
+      javaType: typeof Java,
+      javaAvailable: typeof Java !== "undefined" && Java.available
+    }
+  });
+} catch (e) {}
 
 rpc.exports = {
   classMatch: function classMatch(name) {
@@ -411,13 +502,13 @@ exports.searchHandles = function (clazz) {
     });
   };
 
-  Java.perform(f);
+  Java.performNow(f);
   return result;
 };
 
 exports.getRealClassNameByHandle = function (handle) {
   var result = null;
-  Java.perform(function () {
+  Java.performNow(function () {
     var obj = Java.use("java.lang.Object");
     var jObject = Java.cast(ptr(handle), obj);
     result = getRealClassName(jObject);
@@ -445,7 +536,7 @@ var getObjectByHandle = function getObjectByHandle(handle) {
 
 exports.getObjectFieldValue = function (handle, field, clazz) {
   var result = "null";
-  Java.perform(function () {
+  Java.performNow(function () {
     var origObject = getObjectByHandle(handle);
     var value;
 
@@ -481,7 +572,7 @@ exports.getObjectFieldValue = function (handle, field, clazz) {
 
 exports.instanceOf = function (handle, className) {
   var result = false;
-  Java.perform(function () {
+  Java.performNow(function () {
     try {
       var targetClass = Java.use(className);
       var newObject = Java.cast(getObjectByHandle(handle), targetClass);
@@ -495,7 +586,7 @@ exports.instanceOf = function (handle, className) {
 
 exports.mapDump = function (handle) {
   var result = {};
-  Java.perform(function () {
+  Java.performNow(function () {
     try {
       var mapClass = Java.use("java.util.Map");
       var entryClass = Java.use("java.util.Map$Entry");
@@ -529,7 +620,7 @@ exports.mapDump = function (handle) {
 
 exports.collectionDump = function (handle) {
   var result = [];
-  Java.perform(function () {
+  Java.performNow(function () {
     try {
       var collectionClass = Java.use("java.util.Collection");
       var collectionObject = getObjectByHandle(handle);

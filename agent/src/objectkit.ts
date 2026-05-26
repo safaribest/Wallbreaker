@@ -40,13 +40,13 @@ export const searchHandles = (clazz: string, stop: boolean = false) => {
             },
         });
     }
-    Java.perform(f);
+    Java.performNow(f);
     return result;
 };
 
 export const getRealClassNameByHandle = (handle: string) => {
     let result: string | null = null;
-    Java.perform(function () {
+    Java.performNow(function () {
         const obj = Java.use("java.lang.Object");
         const jObject = Java.cast(ptr(handle), obj);
         result = getRealClassName(jObject);
@@ -72,7 +72,7 @@ const getObjectByHandle = (handle: string) => {
 
 export const getObjectFieldValue = (handle: string, field: string, clazz: string) => {
     let result: string = "null";
-    Java.perform(function () {
+    Java.performNow(function () {
         let origObject = getObjectByHandle(handle);
         let value;
         if (clazz) {
@@ -103,7 +103,7 @@ export const getObjectFieldValue = (handle: string, field: string, clazz: string
 
 export const instanceOf = (handle: string, className: string) => {
     let result: boolean = false;
-    Java.perform(function () {
+    Java.performNow(function () {
         try {
             const targetClass = Java.use(className);
             const newObject = Java.cast(getObjectByHandle(handle), targetClass);
@@ -118,7 +118,7 @@ export const instanceOf = (handle: string, className: string) => {
 
 export const mapDump = (handle: string) => {
     let result: any = {};
-    Java.perform(function () {
+    Java.performNow(function () {
         try {
             const mapClass = Java.use("java.util.Map");
             const entryClass = Java.use("java.util.Map$Entry");
@@ -149,7 +149,7 @@ export const mapDump = (handle: string) => {
 
 export const collectionDump = (handle: string) => {
     let result: any = [];
-    Java.perform(function () {
+    Java.performNow(function () {
         try {
             const collectionClass = Java.use("java.util.Collection");
             const collectionObject = getObjectByHandle(handle);

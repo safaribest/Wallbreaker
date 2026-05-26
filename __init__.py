@@ -2,10 +2,12 @@ __description__ = "a plugin to help you understand java world."
 
 import json
 import os
+import time
 
 import click
 
 from objection.utils.plugin import Plugin
+from objection.state.connection import state_connection
 
 
 class DvmDescConverter:
@@ -39,6 +41,8 @@ class WallBreaker(Plugin):
 
     def __init__(self, ns):
         self.script_path = os.path.join(os.path.dirname(__file__), "agent/_agent.js")
+        self.on_message_handler = self.on_message
+        self.object_classes = {}
 
         implementation = {
             'meta': 'help you understand java world.',
@@ -68,9 +72,52 @@ class WallBreaker(Plugin):
 
         super().__init__(__file__, ns, implementation)
 
+        self.script_src = None
+
+    def inject(self):
+        self._prepare_source()
+        if not self.script_src:
+            raise Exception('Unable to discover Frida script source to inject')
+
+        if not self.agent:
+            self.agent = state_connection.get_agent()
+
+        self.session = self.agent.session
+        if not self.session:
+            raise Exception('Unable to discover Objection Frida session')
+
+        self.script = self.session.create_script(source=self.script_src)
+        self.script.on('message', self.on_message_handler if self.on_message_handler else self.agent.handlers.script_on_message)
+        self.script.load()
+        self.api = self.script.exports
+
+    def ensure_injected(self):
+        if self.api:
+            return
+
+        click.secho("[wallbreaker] injecting agent...", fg="bright_black")
+        time.sleep(1)
         self.inject()
 
+    def on_message(self, message, data):
+        if message.get('type') == 'send':
+            payload = message.get('payload')
+            if isinstance(payload, dict) and payload.get('type') == 'wallbreaker-debug':
+                click.secho(
+                    "[wallbreaker-agent] {} {}".format(
+                        payload.get('event'),
+                        json.dumps(payload.get('detail', {}), ensure_ascii=False)
+                    ),
+                    fg="bright_black"
+                )
+                return
+            click.secho("(agent) {}".format(payload))
+            return
+
+        click.secho("[wallbreaker-agent] {}".format(message), fg="yellow")
+
     def classdump(self, args=None):
+        self.ensure_injected()
         short_name = True
         target_name = ""
         for arg in args:
@@ -79,12 +126,18 @@ class WallBreaker(Plugin):
             else:
                 target_name = arg
 
+        click.secho("[wallbreaker] classdump target: {}".format(target_name), fg="bright_black")
         self._class_dump(target_name, pretty_print=True, short_name=short_name)
 
     def classsearch(self, args=None):
         pattern = args[0]
-        instances = self.api.class_match(pattern)
-        print("\n".join(instances))
+        click.secho("[wallbreaker] classsearch pattern: {}".format(pattern), fg="bright_black")
+        instances = self._class_match(pattern)
+        click.secho("[wallbreaker] matched classes: {}".format(len(instances)), fg="bright_black")
+        if instances:
+            print("\n".join(instances))
+        else:
+            click.secho("[wallbreaker] no matched loaded classes.", fg="yellow")
 
     def objectdump(self, args=None):
         short_name = True
@@ -106,21 +159,69 @@ class WallBreaker(Plugin):
 
     def objectsearch(self, args=None):
         clsname = args[0]
-        instances = self.api.object_search(clsname, stop=False)
+        instances = self._object_search(clsname)
         for handle in instances:
             print("[{}]: {}".format(handle, instances[handle]))
 
     def _class_match(self, pattern):
-        return self.api.class_match(pattern)
+        try:
+            results = state_connection.get_api().android_hooking_enumerate(pattern)
+            classes = []
+            seen = set()
+            for result in results:
+                for clazz in result.get('classes', []):
+                    name = clazz.get('name')
+                    if name and name not in seen:
+                        seen.add(name)
+                        classes.append(name)
+            return sorted(classes)
+        except Exception as e:
+            click.secho(
+                "[wallbreaker] objection class enumerate failed, falling back to wallbreaker agent: {}".format(e),
+                fg="yellow"
+            )
+            self.ensure_injected()
+            return self.api.class_match(pattern)
 
     def _class_use(self, name):
-        return json.loads(self.api.class_use(name))
+        target = json.loads(self.api.class_use(name))
+        click.secho(
+            "[wallbreaker] class_use result: name={}, ctors={}, static_methods={}, instance_methods={}, static_fields={}, instance_fields={}".format(
+                target.get('name'),
+                len(target.get('constructors', [])),
+                len(target.get('staticMethods', {})),
+                len(target.get('instanceMethods', {})),
+                len(target.get('staticFields', {})),
+                len(target.get('instanceFields', {}))
+            ),
+            fg="bright_black"
+        )
+        return target
 
     def _object_get_classname(self, handle):
+        if str(handle) in self.object_classes:
+            return self.object_classes[str(handle)]
         return self.api.object_get_class(handle)
 
     def _object_get_field(self, handle, field, as_class=None):
         return self.api.object_get_field(handle, field, as_class)
+
+    def _object_search(self, clsname):
+        try:
+            objects = state_connection.get_api().android_heap_get_live_class_instances(clsname)
+            results = {}
+            for obj in objects:
+                handle = str(obj.get('hashcode'))
+                self.object_classes[handle] = obj.get('classname') or clsname
+                results[handle] = obj.get('tostring')
+            return results
+        except Exception as e:
+            click.secho(
+                "[wallbreaker] objection heap search failed, falling back to wallbreaker agent: {}".format(e),
+                fg="yellow"
+            )
+            self.ensure_injected()
+            return self.api.object_search(clsname, False)
 
     def _class_dump(self, name, handle=None, pretty_print=False, short_name=True):
         target = self._class_use(name)
@@ -269,11 +370,14 @@ class WallBreaker(Plugin):
         return result
 
     def _object_dump(self, handle, as_class=None, **kwargs):
+        handle = str(handle)
+        if as_class is None and handle in self.object_classes:
+            return self._object_dump_from_objection_heap(handle, self.object_classes[handle], **kwargs)
+
         special_render = {
             "java.util.Map": self._map_dump,
             "java.util.Collection": self._collection_dump
         }
-        handle = str(handle)
         if as_class is None: as_class = self._object_get_classname(handle)
         result = self._class_dump(as_class, handle=handle, **kwargs)
         for clazz in special_render:
@@ -282,6 +386,58 @@ class WallBreaker(Plugin):
             if "pretty_print" in kwargs and kwargs["pretty_print"]:
                 click.secho("\n/* special type dump - {} */".format(clazz), fg="bright_black")
             result += special_render[clazz](handle, **kwargs)
+        return result
+
+    def _object_dump_from_objection_heap(self, handle, class_name, pretty_print=False, **kwargs):
+        api = state_connection.get_api()
+        result = ""
+        if pretty_print:
+            click.secho("")
+            click.secho("[wallbreaker] objectdump via objection heap: handle={}, class={}".format(handle, class_name), fg="bright_black")
+
+        try:
+            fields = api.android_heap_print_fields(int(handle))
+        except Exception as e:
+            fields = []
+            if pretty_print:
+                click.secho("[wallbreaker] failed to read fields: {}".format(e), fg="red")
+
+        try:
+            methods = api.android_heap_print_methods(int(handle))
+        except Exception as e:
+            methods = []
+            if pretty_print:
+                click.secho("[wallbreaker] failed to read methods: {}".format(e), fg="red")
+
+        result += "class {} {{\n\n".format(class_name)
+        if pretty_print:
+            click.secho("class ", fg="blue", nl=False)
+            click.secho(class_name, nl=False)
+            click.secho(" {\n\n", fg="red", nl=False)
+
+        result += "\t/* instance fields */\n"
+        if pretty_print:
+            click.secho("\t/* instance fields */", fg="bright_black")
+        for field in fields:
+            line = "\t{} => {}\n".format(field.get('name'), field.get('value'))
+            result += line
+            if pretty_print:
+                click.secho("\t", nl=False)
+                click.secho(str(field.get('name')), fg="red", nl=False)
+                click.secho(" => ", nl=False)
+                click.secho(str(field.get('value')), fg="bright_cyan")
+
+        result += "\n\t/* methods */\n"
+        if pretty_print:
+            click.secho("\n\t/* methods */", fg="bright_black")
+        for method in methods:
+            result += "\t{}\n".format(method)
+            if pretty_print:
+                click.secho("\t{}".format(method))
+
+        result += "\n}\n"
+        if pretty_print:
+            click.secho("\n}\n", fg="red", nl=False)
         return result
 
     def _map_dump(self, handle, pretty_print=False, **kwargs):

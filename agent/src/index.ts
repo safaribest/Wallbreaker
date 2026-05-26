@@ -13,6 +13,18 @@ import {
     searchHandles
 } from "./objectkit";
 
+try {
+    send({
+        type: "wallbreaker-debug",
+        event: "agent_loaded",
+        detail: {
+            javaType: typeof Java,
+            javaAvailable: typeof Java !== "undefined" && Java.available
+        }
+    });
+} catch (e) {
+}
+
 rpc.exports = {
     classMatch: function (name: string) {
         return match(name);
